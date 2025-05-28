@@ -2,12 +2,38 @@ import ipaddress
 import subprocess
 import platform
 import sys
+import time
+import argparse
 from concurrent.futures import ThreadPoolExecutor
 from tqdm import tqdm
 from rich.console import Console
+from rich.panel import Panel
+from rich.text import Text
+from rich.prompt import Prompt, Confirm
 import pandas as pd
 
 console = Console()
+
+def display_banner():
+    """Display the geeky banner for Ping Sweeper."""
+    banner_text = """
+    ██████╗ ██╗███╗   ██╗ ██████╗     ███████╗██╗    ██╗███████╗███████╗██████╗ ███████╗██████╗ 
+    ██╔══██╗██║████╗  ██║██╔════╝     ██╔════╝██║    ██║██╔════╝██╔════╝██╔══██╗██╔════╝██╔══██╗
+    ██████╔╝██║██╔██╗ ██║██║  ███╗    ███████╗██║ █╗ ██║█████╗  █████╗  ██████╔╝█████╗  ██████╔╝
+    ██╔═══╝ ██║██║╚██╗██║██║   ██║    ╚════██║██║███╗██║██╔══╝  ██╔══╝  ██╔═══╝ ██╔══╝  ██╔══██╗
+    ██║     ██║██║ ╚████║╚██████╔╝    ███████║╚███╔███╔╝███████╗███████╗██║     ███████╗██║  ██║
+    ╚═╝     ╚═╝╚═╝  ╚═══╝ ╚═════╝     ╚══════╝ ╚══╝╚══╝ ╚══════╝╚══════╝╚═╝     ╚══════╝╚═╝  ╚═╝
+    """
+    
+    credit_text = "Made with ❤️  by Quasar CyberTech Research Team"
+    
+    panel = Panel(
+        Text(banner_text, style="bold green") + "\n" + 
+        Text(credit_text, style="bold magenta", justify="center"),
+        padding=(1, 2)
+    )
+    console.print(panel)
+    console.print()
 
 def ping_ip(ip):
     """Ping a single IP and return (IP, is_reachable)."""
@@ -89,35 +115,127 @@ def style_and_save_excel(all_results, all_reachable, all_unreachable, output_exc
 
     console.print(f"\n[green]Scan complete! Results saved to:[/green] [bold]{output_excel}[/bold]")
 
-def main(input_file, output_excel):
-    entries = read_input_file(input_file)
+def interactive_mode():
+    """Interactive mode for user-friendly operation."""
+    console.print("[bold yellow]🔍 Interactive Ping Sweeper Mode[/bold yellow]")
+    console.print("Enter IP addresses or CIDR ranges to scan (one per line)")
+    console.print("Examples: 192.168.1.1, 10.0.0.0/24, 172.16.5.0/26")
+    console.print("Type 'done' when finished, 'quit' to exit\n")
+    
+    entries = []
+    while True:
+        try:
+            entry = Prompt.ask("[cyan]Enter IP/CIDR").strip()
+            if entry.lower() == 'quit':
+                console.print("[yellow]Exiting...[/yellow]")
+                sys.exit(0)
+            elif entry.lower() == 'done':
+                break
+            elif entry:
+                # Validate entry
+                network = determine_subnet(entry)
+                if network:
+                    entries.append(entry)
+                    console.print(f"[green]✓ Added: {network}[/green]")
+                else:
+                    console.print("[red]Invalid entry, please try again[/red]")
+        except KeyboardInterrupt:
+            console.print("\n[yellow]Interrupted by user[/yellow]")
+            sys.exit(0)
+    
+    if not entries:
+        console.print("[red]No valid entries provided. Exiting.[/red]")
+        sys.exit(1)
+    
+    # Get threading preference
+    max_threads = Prompt.ask(
+        "[cyan]Max threads for scanning",
+        default="100",
+        show_default=True
+    )
+    try:
+        max_threads = int(max_threads)
+    except ValueError:
+        max_threads = 100
+        console.print("[yellow]Invalid thread count, using default: 100[/yellow]")
+    
+    # Get output file preference
+    output_excel = Prompt.ask(
+        "[cyan]Output Excel filename",
+        default="ping_scan_results.xlsx",
+        show_default=True
+    )
+    
+    return entries, output_excel, max_threads
+
+def main(input_file=None, output_excel="ping_scan_results.xlsx", max_threads=100, interactive=False):
+    display_banner()
+    
+    if interactive:
+        entries, output_excel, max_threads = interactive_mode()
+    elif input_file:
+        entries = read_input_file(input_file)
+    else:
+        input_file = input("Enter path to input file (e.g., ip_list.txt): ").strip()
+        entries = read_input_file(input_file)
+    
     all_results = {}
     all_reachable = []
     all_unreachable = []
-
+    
+    start_time = time.time()
+    
     for entry in entries:
         network = determine_subnet(entry)
         if not network:
             continue
 
-        console.print(f"[cyan]Scanning: {network}[/cyan]")
-        results = scan_network(network)
+        console.print(f"[cyan]Scanning: {network} ({len(list(network.hosts()))} hosts)[/cyan]")
+        results = scan_network(network, max_threads)
 
         df = pd.DataFrame(results, columns=["IP Address", "Status"])
         sheet_name = str(network).replace("/", "_")[:31]
         all_results[sheet_name] = df
 
+        reachable_count = sum(1 for ip, status in results if status == "Reachable")
+        console.print(f"[green]✓ Found {reachable_count} reachable hosts in {network}[/green]")
+
         all_reachable.extend([ip for ip, status in results if status == "Reachable"])
         all_unreachable.extend([ip for ip, status in results if status == "Unreachable"])
 
+    total_time = time.time() - start_time
+    console.print(f"\n[bold]📊 Scan Summary:[/bold]")
+    console.print(f"[green]Total Reachable: {len(all_reachable)}[/green]")
+    console.print(f"[red]Total Unreachable: {len(all_unreachable)}[/red]")
+    console.print(f"[blue]Total Time: {total_time:.2f} seconds[/blue]")
+    
     style_and_save_excel(all_results, all_reachable, all_unreachable, output_excel)
 
 if __name__ == "__main__":
-    if len(sys.argv) >= 2:
-        input_file = sys.argv[1]
+    parser = argparse.ArgumentParser(
+        description="Ping Sweeper - Network Host Discovery Tool",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python ping_sweeper.py -f ip_list.txt
+  python ping_sweeper.py -i
+  python ping_sweeper.py -f networks.txt -o results.xlsx -t 200
+        """
+    )
+    
+    parser.add_argument('-f', '--file', help='Input file containing IP addresses/CIDR ranges')
+    parser.add_argument('-o', '--output', default='ping_scan_results.xlsx', 
+                       help='Output Excel file (default: ping_scan_results.xlsx)')
+    parser.add_argument('-t', '--threads', type=int, default=100, 
+                       help='Maximum number of threads (default: 100)')
+    parser.add_argument('-i', '--interactive', action='store_true', 
+                       help='Run in interactive mode')
+    
+    args = parser.parse_args()
+    
+    if args.interactive:
+        main(interactive=True)
+    elif args.file:
+        main(args.file, args.output, args.threads)
     else:
-        input_file = input("Enter path to input file (e.g., ip_list.txt): ").strip()
-
-    output_excel = "ping_scan_results.xlsx"
-    main(input_file, output_excel)
-    #account test commit
+        main()
